@@ -1,0 +1,320 @@
+openapi: 3.0.3
+info:
+  title: Profile Service API
+  version: 1.0.0
+  description: API для структурированного профиля разработчика.
+    Хранит навыки, краткосрочные и долгосрочные цели, интересы. API для чтения другими сервисами.
+    Поддерживает публичный read-only просмотр профиля.
+
+servers:
+  - url: http://localhost:8000
+
+security:
+  - bearerAuth: []
+
+paths:
+  /profile:
+    post:
+      summary: Добавление профиля
+      description: Добавление профиля пользователя
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileCreate'
+      responses:
+        '201':
+          description: Профиль успешно создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          description: Ошибка в данных запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/me:
+    get:
+      summary: Получить профиль текущего пользователя
+      description: Возвращает профиль авторизованного пользователя по JWT
+      responses:
+        '200':
+          description: Профиль успешно получен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          description: Не авторизован
+        '404':
+          description: Профиль не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      summary: Обновить свой профиль
+      description: Частичное обновление профиля текущего пользователя (не требует указания profileId)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdate'
+      responses:
+        '200':
+          description: Профиль успешно обновлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          description: Ошибка в данных запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Не авторизован
+        '404':
+          description: Профиль не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/by-username/{username}:
+    get:
+      summary: Публичный профиль по username
+      description: Read-only просмотр профиля для портфолио. Не требует авторизации.
+      security: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          description: Имя пользователя
+          schema:
+            type: string
+            example: super_cool_username
+      responses:
+        '200':
+          description: Публичный профиль
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '404':
+          description: Профиль не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profile/{profileId}:
+    get:
+      summary: Получить полный профиль по ID
+      description: Вся информация о разработчике - bio, стек, опыт, скиллы, уровень, интересы, цели
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Успешно
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '404':
+          description: Профиль не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Profile:
+      type: object
+      description: Полная модель портфолио разработчика
+      properties:
+        id:
+          type: integer
+          description: Уникальный идентификатор
+          example: 123
+        user_id:
+          type: integer
+          description: ID пользователя из auth-service
+          example: 31
+        username:
+          type: string
+          description: Имя пользователя
+          example: "super_cool_username"
+        bio:
+          type: string
+          description: Описание профиля
+          example: "Beginner JavaScript Programmer"
+        stack:
+          type: array
+          description: Список языков/фреймворков/технологий
+          items:
+            type: string
+          example: ["PostgreSQL", "Python", "JavaScript"]
+        experience:
+          type: string
+          description: Описание опыта работы/стажировок/пет-проектов
+          example: "Работал 5 лет в компании Х. Занимался настройкой сетевого оборудования"
+        skills:
+          type: array
+          description: Навыки с уровнями (self-assessment и calculated)
+          items:
+            $ref: '#/components/schemas/Skill'
+        interests:
+          type: array
+          description: Интересы разработчика
+          items:
+            $ref: '#/components/schemas/Interest'
+        short_term_goals:
+          type: array
+          description: Краткосрочные цели (изучить X, сделать Y)
+          items:
+            type: string
+          example: ["Изучить Redis", "Написать pet-project на FastAPI"]
+        long_term_goals:
+          type: array
+          description: Долгосрочные цели
+          items:
+            type: string
+          example: ["Стать Senior JavaScript Developer", "Backend Tech Lead"]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ProfileCreate:
+      type: object
+      required:
+        - username
+      properties:
+        username:
+          type: string
+          example: "super_cool_username"
+        bio:
+          type: string
+        stack:
+          type: array
+          items:
+            type: string
+        experience:
+          type: string
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/Skill'
+        interests:
+          type: array
+          items:
+            $ref: '#/components/schemas/Interest'
+        short_term_goals:
+          type: array
+          items:
+            type: string
+        long_term_goals:
+          type: array
+          items:
+            type: string
+        is_public:
+          type: boolean
+          default: false
+
+    ProfileUpdate:
+      type: object
+      description: Частичное обновление (все поля опциональны)
+      properties:
+        bio:
+          type: string
+        stack:
+          type: array
+          items:
+            type: string
+        experience:
+          type: string
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/Skill'
+        interests:
+          type: array
+          items:
+            $ref: '#/components/schemas/Interest'
+        short_term_goals:
+          type: array
+          items:
+            type: string
+        long_term_goals:
+          type: array
+          items:
+            type: string
+        is_public:
+          type: boolean
+
+    Skill:
+      type: object
+      description: Навык (язык/фреймворк/инструмент)
+      properties:
+        name:
+          type: string
+          example: "Python"
+        type:
+          type: string
+          enum: [language, framework, tool]
+          description: Категория навыка
+        self_assessment_level:
+          type: string
+          description: Уровень по self-assessment
+          enum: [junior, middle, senior, expert]
+        years_of_experience:
+          type: number
+          format: float
+          nullable: true
+
+    Interest:
+      type: object
+      description: Интерес разработчика
+      properties:
+        name:
+          type: string
+          example: "Distributed systems"
+        category:
+          type: string
+          example: "Backend"
+
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Сообщение об ошибке
+        code:
+          type: string
+          nullable: true
+      example:
+        detail: "Profile not found"
+        code: "PROFILE_NOT_FOUND"
+
+
