@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: myapp_db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -q"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: my_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      INTEGRATIONS_BASE_URL: "http://integrations:8004"
+      AUTH_SERVICE_URL: "http://auth-service:8000"
+      JWT_SECRET: "change-me-in-env"
+      JWT_ALGORITHM: "HS256"
+    depends_on:
+      - postgres
+
+
+volumes:
+  postgres_data:

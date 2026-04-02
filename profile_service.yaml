@@ -238,14 +238,13 @@ components:
           type: array
           items:
             type: string
-        is_public:
-          type: boolean
-          default: false
 
     ProfileUpdate:
       type: object
       description: Частичное обновление (все поля опциональны)
       properties:
+        name:
+          type: string
         bio:
           type: string
         stack:
@@ -270,8 +269,6 @@ components:
           type: array
           items:
             type: string
-        is_public:
-          type: boolean
 
     Skill:
       type: object
@@ -287,7 +284,7 @@ components:
         self_assessment_level:
           type: string
           description: Уровень по self-assessment
-          enum: [junior, middle, senior, expert]
+          enum: [junior, middle, senior]
         years_of_experience:
           type: number
           format: float
