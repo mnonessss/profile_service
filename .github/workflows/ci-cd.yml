@@ -29,7 +29,7 @@ jobs:
         run: pytest tests/ -v --tb=short
 
       - name: Run Lint
-        run: ruff check .
+        run: ruff check . --fix
 
   build-and-push:
     needs: test
