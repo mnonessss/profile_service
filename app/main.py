@@ -10,7 +10,7 @@ from app.database import get_db
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from jose import ExpiredSignatureError, JWTError, jwt
 
 from sqlalchemy import select
@@ -77,6 +77,32 @@ async def get_current_user_id(request: Request) -> int:
     if user_id is None:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return user_id
+
+
+async def get_current_profile(db: AsyncSession, user_id: int) -> models.Profile:
+    stmt = select(models.Profile).where(models.Profile.user_id == user_id)
+    result = await db.execute(stmt)
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile
+
+
+def _integrations_internal_headers(profile_id: int) -> dict:
+    return {"X-Internal-User-Id": str(profile_id)}
+
+
+def _integrations_json_response(response: httpx.Response) -> JSONResponse:
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            return JSONResponse(status_code=response.status_code, content=response.json())
+        except Exception:
+            pass
+    return JSONResponse(
+        status_code=response.status_code,
+        content={"detail": response.text},
+    )
 
 
 # ----- Корневой эндпоинт -----
@@ -157,6 +183,77 @@ async def fetch_monkeytype_via_integrations(
         status_code=response.status_code,
         content={"detail": response.text},
     )
+
+
+@app.post("/profile/integrations/github/connect")
+async def github_connect_via_integrations(
+    body: schemas.GithubConnectProxyRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """
+    Прокси на POST /integrations/github/connect integrations-service.
+    Передаёт username (GitHub) и internal_user_id = id профиля в profile-service.
+    """
+    profile = await get_current_profile(db, user_id)
+    url = f"{INTEGRATIONS_BASE_URL}/integrations/github/connect"
+    payload = {
+        "username": body.username,
+        "internal_user_id": profile.id,
+    }
+    headers = _integrations_internal_headers(profile.id)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=503,
+            detail="Integrations service is unavailable",
+        )
+    return _integrations_json_response(response)
+
+
+@app.get("/profile/integrations/github/private-stats")
+async def github_private_stats_via_integrations(
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Прокси на GET /integrations/github/private-stats с X-Internal-User-Id."""
+    profile = await get_current_profile(db, user_id)
+    url = f"{INTEGRATIONS_BASE_URL}/integrations/github/private-stats"
+    headers = _integrations_internal_headers(profile.id)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=503,
+            detail="Integrations service is unavailable",
+        )
+    return _integrations_json_response(response)
+
+
+@app.delete("/profile/integrations/{provider}")
+async def integrations_disconnect_via_integrations(
+    provider: str,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Прокси на DELETE /integrations/{provider} с X-Internal-User-Id."""
+    profile = await get_current_profile(db, user_id)
+    url = f"{INTEGRATIONS_BASE_URL}/integrations/{provider}"
+    headers = _integrations_internal_headers(profile.id)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.delete(url, headers=headers)
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=503,
+            detail="Integrations service is unavailable",
+        )
+    if response.status_code == 204:
+        return Response(status_code=204)
+    return _integrations_json_response(response)
 
 
 # ----- GET /profile/me — профиль текущего пользователя -----

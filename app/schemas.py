@@ -47,3 +47,9 @@ class ProfileResponse(ProfileBase):
 
 class MonkeytypeProxyRequest(BaseModel):
     username: str
+
+
+class GithubConnectProxyRequest(BaseModel):
+    """GitHub username для привязки к профилю."""
+
+    username: str
