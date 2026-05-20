@@ -1,0 +1,43 @@
+version: '3.8'
+
+# Продакшен: только готовые образы из реестра, без build и bind mount.
+# На сервере рядом должен лежать .env с DB_USER, DB_PASSWORD, DB_NAME и др.
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: profile_service_db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -q"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: git.klsh.ru/team3/profile_service:${IMAGE_TAG:-latest}
+    container_name: profile_service_app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      INTEGRATIONS_BASE_URL: ${INTEGRATIONS_BASE_URL:-http://integrations:8004}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://auth-service:8000}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

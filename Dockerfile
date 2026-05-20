@@ -3,13 +3,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ВАЖНО: код НЕ копируется в образ!
-# Мы будем использовать bind mount при разработке, чтобы не пересобирать образ
-# при каждом изменении кода. Для продакшена код нужно копировать.
+COPY app/ ./app/
+COPY metrics.py ./
 
-# Команда для запуска приложения
-# Важно: приложение находится в пакете app, поэтому ASGI-путь app.main:app
-# --host 0.0.0.0 - слушаем все сетевые интерфейсы внутри контейнера
-# --port 8000 - стандартный порт для разработки
-# --reload - автоматический перезапуск при изменениях кода (только для разработки!)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# В dev docker-compose.yml монтирует .:/app поверх образа (bind mount + --reload в override).
+# В prod используется готовый образ из реестра без volume.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

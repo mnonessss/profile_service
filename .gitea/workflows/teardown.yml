@@ -1,0 +1,16 @@
+name: Teardown
+
+on:
+  workflow_dispatch:
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop and remove containers
+        run: docker compose -f docker-compose.prod.yml down --remove-orphans
+
+      - name: Show remaining containers
+        run: docker ps -a --filter "name=profile_service"
