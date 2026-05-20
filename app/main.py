@@ -4,9 +4,15 @@
 
 import os
 from typing import Optional
-
+import time
+from metrics import REQUEST_COUNT, REQUEST_LATENCY
+from starlette.middleware.base import BaseHTTPMiddleware
 from app import models, schemas
 from app.database import get_db
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+import logging
+import json
+from datetime import datetime
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -23,11 +29,80 @@ app = FastAPI(
     version="1.0.0",
 )
 
+class MetricsMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware для сбора метрик по каждому запросу.
+    Выполняется для каждого запроса автоматически.
+    """
+    async def dispatch(self, request: Request, call_next):
+    # Запоминаем время начала обработки запроса
+        start = time.time()
+        # Передаём запрос дальше (в эндпоинт)
+        response = await call_next(request)
+        # Вычисляем, сколько времени заняла обработка
+        duration = time.time() - start
+        # Увеличиваем счётчик запросов
+        # .labels() позволяет указать значения меток
+        REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+        ).inc()
+        # Записываем время выполнения в гистограмму
+        REQUEST_LATENCY.labels(
+        method=request.method,
+        endpoint=request.url.path
+        ).observe(duration)
+        return response
+
+app.add_middleware(MetricsMiddleware)
+
+
+_LOG_RECORD_SKIP = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "module", "msecs",
+    "message", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "thread", "threadName", "taskName",
+})
+
+
+class JSONFormatter(logging.Formatter):
+    """
+    Форматтер, который выводит логи в виде JSON.
+    Поля из extra= попадают в корень JSON-объекта.
+    """
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _LOG_RECORD_SKIP:
+                log_entry[key] = value
+        return json.dumps(log_entry)
+# Настройка корневого логгера
+handler = logging.StreamHandler() # выводим в консоль
+handler.setFormatter(JSONFormatter()) # используем JSON-форматтер
+logging.root.addHandler(handler)
+logging.root.setLevel(logging.INFO) # уровень INFO (WARNING, ERROR и выше тоже выводятся)
+# Создаём логгер для текущего модуля
+logger = logging.getLogger(__name__)
+
 INTEGRATIONS_BASE_URL = os.getenv("INTEGRATIONS_BASE_URL", "http://integrations:8004")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8000")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-env")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-PUBLIC_PATHS = {"/", "/docs", "/openapi.json", "/redoc"}
+PUBLIC_PATHS = {
+    "/",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/metrics",
+    "/test/error",
+    "/test/slow",
+}
 
 
 def _extract_user_id(payload: dict) -> Optional[int]:
@@ -110,6 +185,7 @@ def _integrations_json_response(response: httpx.Response) -> JSONResponse:
 
 @app.get("/")
 def root():
+    logger.info("Root endpoint requested")
     return {
         "message": "Profile Service API",
         "docs": "/docs",
@@ -126,6 +202,7 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
+    logger.info("Creating profile", extra={"user_id": user_id})
     db_profile = models.Profile(
         user_id=user_id,
         username=profile_in.username,
@@ -140,6 +217,7 @@ async def create_profile(
     db.add(db_profile)
     await db.commit()
     await db.refresh(db_profile)
+    logger.info("Profile created", extra={"profile_id": db_profile.id, "user_id": user_id})
     return db_profile
 
 
@@ -156,11 +234,13 @@ async def fetch_monkeytype_via_integrations(
     - дергает integrations-service по HTTP
     - возвращает ответ integrations-service как есть
     """
+    logger.info("Fetching monkeytype stats", extra={"user_id": user_id, "username": body.username})
     url = f"{INTEGRATIONS_BASE_URL}/integrations/monkeytype/fetch"
     stmt = select(models.Profile).where(models.Profile.user_id == user_id)
     result = await db.execute(stmt)
     profile = result.scalar_one_or_none()
     if not profile:
+        logger.warning("Profile not found for monkeytype fetch", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail="Profile not found")
 
     payload = {
@@ -171,11 +251,16 @@ async def fetch_monkeytype_via_integrations(
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(url, json=payload)
     except httpx.HTTPError:
+        logger.error("Integrations service unavailable (monkeytype)", extra={"user_id": user_id})
         raise HTTPException(
             status_code=503,
             detail="Integrations service is unavailable",
         )
 
+    logger.info(
+        "Monkeytype fetch completed",
+        extra={"profile_id": profile.id, "status_code": response.status_code},
+    )
     content_type = response.headers.get("content-type", "")
     if "application/json" in content_type:
         return JSONResponse(status_code=response.status_code, content=response.json())
@@ -195,6 +280,7 @@ async def github_connect_via_integrations(
     Прокси на POST /integrations/github/connect integrations-service.
     Передаёт username (GitHub) и internal_user_id = id профиля в profile-service.
     """
+    logger.info("Connecting GitHub integration", extra={"user_id": user_id, "username": body.username})
     profile = await get_current_profile(db, user_id)
     url = f"{INTEGRATIONS_BASE_URL}/integrations/github/connect"
     payload = {
@@ -206,10 +292,15 @@ async def github_connect_via_integrations(
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError:
+        logger.error("Integrations service unavailable (github connect)", extra={"profile_id": profile.id})
         raise HTTPException(
             status_code=503,
             detail="Integrations service is unavailable",
         )
+    logger.info(
+        "GitHub connect completed",
+        extra={"profile_id": profile.id, "status_code": response.status_code},
+    )
     return _integrations_json_response(response)
 
 
@@ -219,6 +310,7 @@ async def github_private_stats_via_integrations(
     user_id: int = Depends(get_current_user_id),
 ):
     """Прокси на GET /integrations/github/private-stats с X-Internal-User-Id."""
+    logger.info("Fetching GitHub private stats", extra={"user_id": user_id})
     profile = await get_current_profile(db, user_id)
     url = f"{INTEGRATIONS_BASE_URL}/integrations/github/private-stats"
     headers = _integrations_internal_headers(profile.id)
@@ -226,10 +318,15 @@ async def github_private_stats_via_integrations(
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, headers=headers)
     except httpx.HTTPError:
+        logger.error("Integrations service unavailable (github stats)", extra={"profile_id": profile.id})
         raise HTTPException(
             status_code=503,
             detail="Integrations service is unavailable",
         )
+    logger.info(
+        "GitHub private stats fetched",
+        extra={"profile_id": profile.id, "status_code": response.status_code},
+    )
     return _integrations_json_response(response)
 
 
@@ -240,6 +337,7 @@ async def integrations_disconnect_via_integrations(
     user_id: int = Depends(get_current_user_id),
 ):
     """Прокси на DELETE /integrations/{provider} с X-Internal-User-Id."""
+    logger.info("Disconnecting integration", extra={"user_id": user_id, "provider": provider})
     profile = await get_current_profile(db, user_id)
     url = f"{INTEGRATIONS_BASE_URL}/integrations/{provider}"
     headers = _integrations_internal_headers(profile.id)
@@ -247,10 +345,18 @@ async def integrations_disconnect_via_integrations(
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.delete(url, headers=headers)
     except httpx.HTTPError:
+        logger.error(
+            "Integrations service unavailable (disconnect)",
+            extra={"profile_id": profile.id, "provider": provider},
+        )
         raise HTTPException(
             status_code=503,
             detail="Integrations service is unavailable",
         )
+    logger.info(
+        "Integration disconnected",
+        extra={"profile_id": profile.id, "provider": provider, "status_code": response.status_code},
+    )
     if response.status_code == 204:
         return Response(status_code=204)
     return _integrations_json_response(response)
@@ -264,11 +370,14 @@ async def read_profile_me(
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
+    logger.info("Reading current user profile", extra={"user_id": user_id})
     stmt = select(models.Profile).where(models.Profile.user_id == user_id)
     result = await db.execute(stmt)
     profile = result.scalar_one_or_none()
     if not profile:
+        logger.warning("Profile not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail="Profile not found")
+    logger.info("Profile read", extra={"profile_id": profile.id, "user_id": user_id})
     return profile
 
 
@@ -281,10 +390,12 @@ async def update_profile_me(
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
+    logger.info("Updating current user profile", extra={"user_id": user_id})
     stmt = select(models.Profile).where(models.Profile.user_id == user_id)
     result = await db.execute(stmt)
     profile = result.scalar_one_or_none()
     if not profile:
+        logger.warning("Profile not found for update", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail="Profile not found")
 
     update_data = profile_update.model_dump(exclude_unset=True)
@@ -293,6 +404,7 @@ async def update_profile_me(
 
     await db.commit()
     await db.refresh(profile)
+    logger.info("Profile updated", extra={"profile_id": profile.id, "user_id": user_id})
     return profile
 
 
@@ -308,11 +420,14 @@ async def read_profile_by_username(
     db: AsyncSession = Depends(get_db),
     _: int = Depends(get_current_user_id),
 ):
+    logger.info("Reading profile by username", extra={"username": username})
     stmt = select(models.Profile).where(models.Profile.username == username)
     result = await db.execute(stmt)
     profile = result.scalar_one_or_none()
     if not profile:
+        logger.warning("Profile not found by username", extra={"username": username})
         raise HTTPException(status_code=404, detail="Profile not found")
+    logger.info("Profile read by username", extra={"profile_id": profile.id, "username": username})
     return profile
 
 
@@ -325,9 +440,12 @@ async def read_profile_by_id(
     db: AsyncSession = Depends(get_db),
     _: int = Depends(get_current_user_id),
 ):
+    logger.info("Reading profile by id", extra={"profile_id": profile_id})
     profile = await db.get(models.Profile, profile_id)
     if not profile:
+        logger.warning("Profile not found by id", extra={"profile_id": profile_id})
         raise HTTPException(status_code=404, detail="Profile not found")
+    logger.info("Profile read by id", extra={"profile_id": profile.id})
     return profile
 
 
@@ -341,8 +459,10 @@ async def update_profile_by_id(
     db: AsyncSession = Depends(get_db),
     _: int = Depends(get_current_user_id),
 ):
+    logger.info("Updating profile by id", extra={"profile_id": profile_id})
     profile = await db.get(models.Profile, profile_id)
     if not profile:
+        logger.warning("Profile not found for update by id", extra={"profile_id": profile_id})
         raise HTTPException(status_code=404, detail="Profile not found")
 
     update_data = profile_update.model_dump(exclude_unset=True)
@@ -351,6 +471,7 @@ async def update_profile_by_id(
 
     await db.commit()
     await db.refresh(profile)
+    logger.info("Profile updated by id", extra={"profile_id": profile.id})
     return profile
 
 
@@ -362,14 +483,17 @@ async def delete_profile_me(
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
+    logger.info("Deleting current user profile", extra={"user_id": user_id})
     stmt = select(models.Profile).where(models.Profile.user_id == user_id)
     result = await db.execute(stmt)
     profile = result.scalar_one_or_none()
     if not profile:
+        logger.warning("Profile not found for delete", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail="Profile not found")
 
     await db.delete(profile)
     await db.commit()
+    logger.info("Profile deleted", extra={"profile_id": profile.id, "user_id": user_id})
     return
 
 
@@ -382,10 +506,47 @@ async def delete_profile_by_id(
     db: AsyncSession = Depends(get_db),
     _: int = Depends(get_current_user_id),
 ):
+    logger.info("Deleting profile by id", extra={"profile_id": profile_id})
     profile = await db.get(models.Profile, profile_id)
     if not profile:
+        logger.warning("Profile not found for delete by id", extra={"profile_id": profile_id})
         raise HTTPException(status_code=404, detail="Profile not found")
 
     await db.delete(profile)
     await db.commit()
+    logger.info("Profile deleted by id", extra={"profile_id": profile_id})
     return
+
+
+# ----- GET /metrics — метрики -----
+
+@app.get("/metrics")
+async def get_metrics():
+    """
+    Эндпоинт для Prometheus.
+    Prometheus будет заходить сюда каждые 15 секунд и забирать метрики.
+    """
+    logger.info("Metrics endpoint requested")
+    # generate_latest() возвращает все метрики в текстовом формате
+    # CONTENT_TYPE_LATEST — правильный MIME-тип для Prometheus
+    return Response(content=generate_latest(),
+    media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/test/error")
+async def test_error():
+    """
+    Тестовый эндпоинт, который всегда возвращает ошибку 500.
+    Нужен для проверки метрики error rate.
+    """
+    raise HTTPException(status_code=500, detail="Тестовая ошибка")
+
+@app.get("/test/slow")
+async def test_slow():
+    """
+    Тестовый эндпоинт, который имитирует долгую обработку (2 секунды).
+    Нужен для проверки метрики latency.
+    """
+    import time
+    time.sleep(2)
+    return {"status": "ok", "message": "Медленный ответ после 2 секунд"}

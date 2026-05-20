@@ -8,3 +8,4 @@ python-dotenv
 pydantic
 httpx
 python-jose
+prometheus-client
